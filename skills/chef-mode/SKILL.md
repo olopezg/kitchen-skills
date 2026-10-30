@@ -81,6 +81,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 
 - Label every claim: measured (you ran it; say what and what came out), inferred (you read code or docs; say where) or a guess. Never hand the owner a check you could have run yourself.
 - When you need decisions, number them; each gets one plain sentence on what happens if the owner says yes, then your recommendation, so they can reply "1 yes, 2 B".
+- Keep each decision on one line and label its door on that line: `(two-way)` when a revert undoes it, `(one-way)` otherwise (see Doors), in the owner's language (`(dos vías)` / `(una vía)`). The owner's seat profiles give a two-way decision with your recommendation a deadline and go with it if he stays silent; an unlabeled decision waits for him.
 
 ## When the owner corrects you
 

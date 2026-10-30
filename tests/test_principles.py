@@ -70,6 +70,14 @@ class Principles(unittest.TestCase):
         # chef-mode is the one place the kitchen's rules switch on; a principle it leaves out never reaches an agent
         self.assertEqual(sorted(declared(CHEF_MODE)), sorted(self.ids))
 
+    def test_chef_mode_asks_each_decision_for_its_door_on_one_line(self):
+        # the owner's Hermes seat profiles read the label from the coordinator's own line: without it they never
+        # treat a decision as two-way («quien calla otorga», hermes-config 2026-10-30)
+        reporting = CHEF_MODE.read_text(encoding="utf-8").split("## Reporting", 1)[1].split("\n## ", 1)[0]
+        for label in ("`(two-way)`", "`(one-way)`", "`(dos vías)`", "`(una vía)`", "one line"):
+            with self.subTest(label=label):
+                self.assertIn(label, reporting)
+
     def test_chef_mode_alone_vouches_for_no_principle(self):
         # regression: while chef-mode counted as a control, the check below could never fail (audit, 2026-10-26)
         self.assertEqual(enforced_by_a_control([CHEF_MODE]), set())
