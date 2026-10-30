@@ -57,7 +57,7 @@ You hold the full context; the reviewers saw a diff or a file list. Merge each l
 
 Then place it in exactly one bucket:
 
-- **Act on**: real, concrete, worth fixing before merge. Every blocker goes here, however many there are. Aim for 5 or fewer otherwise: past that, you are not filtering the nits hard enough. The cap filters nits; it never hides a blocker.
+- **Act on**: a real, concrete P0 or P1, however many there are. Only these are fixed before merge (chef-mode's review budget).
 - **Consider**: real but optional, or a judgment call for me.
 - **Noted**: true, not worth action now.
 - **Dismissed**: with the reason. This list is a trust mechanism: it lets me overrule you.

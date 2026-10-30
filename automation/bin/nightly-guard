@@ -2,6 +2,11 @@
 # Nightly guard: build, test and prove the tip of the project's branch.
 # Principles: `prove`, `truthful-state` (never green without steps), `owner-attention` (one issue while red).
 # Opens (or comments on) one GitHub issue when a step fails and closes it when the branch is green.
+# Every record lists the steps that finished with their seconds. GUARD_STEP_BUDGETS (optional, "name|seconds") warns
+# when a step runs over its budget, never changing the verdict; a green run over budget opens (or comments on) one
+# issue labelled <GUARD_LABEL>-budget, closed by the next green run within every budget.
+# After each step the daily audit cites (AUDIT_GUARD_STEPS), the guard keeps a copy of AUDIT_EVIDENCE_PATHS from its
+# clone in $STATE_DIR/evidence/<run>/<step>/, for the newest EVIDENCE_KEEP runs that kept any.
 # A red or incomplete run also shows a local notification (lib/kitchen/notify.py); a green one never does.
 # Every run that holds the lock is exactly one line in the nightly history read by `kitchen status`: "running"
 # from the start, replaced when the run ends, however it ends:
@@ -20,6 +25,12 @@ RUN_LOG="$LOG_DIR/guard-$RUN_ID.log"
 exec > >(tee -a "$RUN_LOG") 2>&1
 
 ISSUE_TITLE="Nightly guard failing on $BRANCH"
+BUDGET_TITLE="Nightly guard over its time budget on $BRANCH"
+EVIDENCE_DIR="$STATE_DIR/evidence"
+EVIDENCE_KEEP=3
+declare -p GUARD_STEP_BUDGETS >/dev/null 2>&1 || GUARD_STEP_BUDGETS=()
+declare -p AUDIT_GUARD_STEPS >/dev/null 2>&1 || AUDIT_GUARD_STEPS=()
+declare -p AUDIT_EVIDENCE_PATHS >/dev/null 2>&1 || AUDIT_EVIDENCE_PATHS=()
 TRIAL="${GUARD_ONLY:-}"
 VERDICT="incomplete"
 PHASE="start"
@@ -29,37 +40,123 @@ STARTED=0   # 1 once a project command may have started something that needs cle
 SHA=""
 CLEANUP="skipped"
 METRICS="skipped"
-
-open_issue_number() {
-  gh issue list -R "$GH_REPO" --label "$GUARD_LABEL" --state open --search "in:title \"$ISSUE_TITLE\"" \
-    --json number --jq '.[0].number // empty'
-}
+DONE_NAMES=()     # the steps that finished, in order, with their whole seconds and green/red
+DONE_SECONDS=()
+DONE_STATUS=()
+BUDGET_NAMES=()   # the valid budgets: step name and seconds
+BUDGET_SECONDS=()
+OVER_BUDGET=()    # "<step> <s>s > <budget>s" for each finished step over its budget
 
 # Each gh call ends the function with 1 on failure; the caller records it as a warning.
 report_failure() { # step sha log-file
   [ "${GUARD_NO_REPORT:-0}" = 1 ] && { log "issue report suppressed (GUARD_NO_REPORT)"; return 0; }
-  gh label create "$GUARD_LABEL" -R "$GH_REPO" --color B60205 --description "Nightly guard on the shared branch" >/dev/null 2>&1 || true
-  local last_lines body existing
+  local last_lines body_file="$LOG_DIR/guard-$RUN_ID-issue.md"
   last_lines="$(tail -60 "$3" | redact)" || return 1
-  body="$(printf 'Step **%s** failed on `%s` at %s (run %s).\n\nLast lines of the log (secrets redacted):\n\n```\n%s\n```\n\nFull log on the guard machine: `%s`' \
-    "$1" "$2" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$last_lines" "$RUN_LOG")"
-  existing="$(open_issue_number)" || return 1
-  if [ -n "$existing" ]; then
-    gh issue comment "$existing" -R "$GH_REPO" --body "$body" >/dev/null || return 1
-    log "commented on issue #$existing"
-  else
-    gh issue create -R "$GH_REPO" --title "$ISSUE_TITLE" --label "$GUARD_LABEL" --body "$body" >/dev/null || return 1
-    log "opened issue: $ISSUE_TITLE"
-  fi
+  printf 'Step **%s** failed on `%s` at %s (run %s).\n\nLast lines of the log (secrets redacted):\n\n```\n%s\n```\n\nFull log on the guard machine: `%s`' \
+    "$1" "$2" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$last_lines" "$RUN_LOG" > "$body_file" || return 1
+  report_issue "$GUARD_LABEL" B60205 "Nightly guard on the shared branch" "$ISSUE_TITLE" "$body_file"
 }
 
 report_green() { # sha
   [ "${GUARD_NO_REPORT:-0}" = 1 ] && return 0
   local existing
-  existing="$(open_issue_number)" || return 1
+  existing="$(open_issue_number "$GUARD_LABEL" "$ISSUE_TITLE")" || return 1
   [ -z "$existing" ] && return 0
   gh issue close "$existing" -R "$GH_REPO" --comment "Green again on \`$1\` (run $RUN_ID)." >/dev/null || return 1
   log "closed issue #$existing"
+}
+
+# Green runs only: a red or incomplete run stopped early and proves nothing about time. Without a valid budget the
+# issue is left as is.
+report_budget() { # sha
+  [ "${GUARD_NO_REPORT:-0}" = 1 ] && return 0
+  [ ${#BUDGET_NAMES[@]} -gt 0 ] || return 0
+  local label="$GUARD_LABEL-budget" existing over="" i body_file="$LOG_DIR/guard-$RUN_ID-budget-issue.md"
+  if [ ${#OVER_BUDGET[@]} = 0 ]; then
+    existing="$(open_issue_number "$label" "$BUDGET_TITLE")" || return 1
+    [ -z "$existing" ] && return 0
+    gh issue close "$existing" -R "$GH_REPO" --comment "Every budgeted step within its budget on \`$1\` (run $RUN_ID)." >/dev/null || return 1
+    log "closed budget issue #$existing"
+    return 0
+  fi
+  for ((i = 0; i < ${#OVER_BUDGET[@]}; i++)); do over+="- ${OVER_BUDGET[$i]}"$'\n'; done
+  printf 'Green on `%s` at %s (run %s), with steps over their time budget (GUARD_STEP_BUDGETS):\n\n%s\nEvery step of the run:\n\n%s\n' \
+    "$1" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$over" "$(step_table)" > "$body_file" || return 1
+  report_issue "$label" FBCA04 "Nightly guard step over its time budget" "$BUDGET_TITLE" "$body_file"
+}
+
+step_table() {
+  local i
+  for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do printf -- '- %s: %ss, %s\n' "${DONE_NAMES[$i]}" "${DONE_SECONDS[$i]}" "${DONE_STATUS[$i]}"; done
+}
+
+# The steps that finished, one "<seconds> <status> <name>" line each, as lib/record.py reads them.
+step_lines() {
+  local i
+  for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do printf '%s %s %s\n' "${DONE_SECONDS[$i]}" "${DONE_STATUS[$i]}" "${DONE_NAMES[$i]}"; done
+}
+
+is_step() { # name
+  local entry
+  for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do [ "${entry%%|*}" = "$1" ] && return 0; done
+  return 1
+}
+
+# A budget only ever warns: a malformed entry or one that names no step is a warning, never a failure. Seconds are a
+# whole number without a leading zero (bash would read 010 as octal).
+read_budgets() {
+  local entry name seconds
+  for entry in ${GUARD_STEP_BUDGETS[@]+"${GUARD_STEP_BUDGETS[@]}"}; do
+    name="${entry%%|*}"; seconds="${entry#*|}"
+    if [[ "$entry" != *"|"* ]] || [ -z "$name" ] || [[ ! "$seconds" =~ ^[1-9][0-9]*$ ]]; then
+      warn "malformed step budget: ${entry:-<empty>} (want name|seconds)"
+    elif ! is_step "$name"; then
+      warn "step budget for $name, which is not a step"
+    else
+      BUDGET_NAMES+=("$name"); BUDGET_SECONDS+=("$seconds")
+    fi
+  done
+}
+
+check_budgets() {
+  local i j
+  for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do
+    for ((j = 0; j < ${#BUDGET_NAMES[@]}; j++)); do
+      [ "${DONE_NAMES[$i]}" = "${BUDGET_NAMES[$j]}" ] && [ "${DONE_SECONDS[$i]}" -gt "${BUDGET_SECONDS[$j]}" ] || continue
+      OVER_BUDGET+=("${DONE_NAMES[$i]} ${DONE_SECONDS[$i]}s > ${BUDGET_SECONDS[$j]}s")
+      warn "over budget: ${DONE_NAMES[$i]} ${DONE_SECONDS[$i]}s > ${BUDGET_SECONDS[$j]}s"
+    done
+  done
+}
+
+# A copy of each AUDIT_EVIDENCE_PATHS entry as the step left it: a later step that writes the same path cannot
+# overwrite it. Only for steps the audit cites, never in a trial run; a missing path is a warning.
+snapshot_evidence() { # step
+  local step="$1" cited="" entry path dest
+  for entry in ${AUDIT_GUARD_STEPS[@]+"${AUDIT_GUARD_STEPS[@]}"}; do [ "$entry" = "$step" ] && cited=1; done
+  [ -n "$cited" ] && [ -z "$TRIAL" ] && [ ${#AUDIT_EVIDENCE_PATHS[@]} -gt 0 ] || return 0
+  dest="$EVIDENCE_DIR/$RUN_ID/$step"
+  mkdir -p "$dest" || { warn "evidence of $step not kept: cannot create $dest"; return 0; }
+  for path in "${AUDIT_EVIDENCE_PATHS[@]}"; do
+    path="${path%/}"
+    case "/$path/" in
+      //*|*/../*) warn "evidence path ${path:-<empty>} is not inside the clone: not kept"; continue ;;
+    esac
+    if [ ! -e "$CLONE_DIR/$path" ]; then
+      warn "evidence missing after $step: $path"
+    elif ! { mkdir -p "$(dirname "$dest/$path")" && cp -R "$CLONE_DIR/$path" "$dest/$path"; }; then
+      rm -rf "${dest:?}/$path"  # a partial copy (disk full, an unreadable file) is no evidence: the audit then refuses
+      warn "evidence of $step not kept: copying $path failed"
+    fi
+  done
+  log "evidence of $step kept in $dest"
+}
+
+# Keeps the evidence of the newest EVIDENCE_KEEP runs (run ids sort by start time).
+prune_evidence() {
+  local runs=() dir i
+  for dir in "$EVIDENCE_DIR"/*/; do [ -d "$dir" ] && runs+=("${dir%/}"); done
+  for ((i = 0; i + EVIDENCE_KEEP < ${#runs[@]}; i++)); do rm -rf "${runs[$i]}"; done
 }
 
 run_cleanup() {
@@ -127,6 +224,7 @@ finish() {
     [ -z "$FAILED" ] && FAILED="$PHASE"
     warn "aborted during $PHASE (exit $rc)"
   fi
+  check_budgets
   run_cleanup
   case "$VERDICT" in green|red) [ "$STARTED" = 1 ] && record_metrics && mirror_history ;; esac
   if [ -n "$TRIAL" ]; then
@@ -134,14 +232,17 @@ finish() {
   elif [ "$VERDICT" != "skipped: busy" ]; then
     case "$VERDICT" in
       red) report_failure "$FAILED" "$SHA" "$FAILED_LOG" || warn "issue report failed" ;;
-      green) report_green "$SHA" || warn "issue report failed" ;;
+      green)
+        report_green "$SHA" || warn "issue report failed"
+        report_budget "$SHA" || warn "budget issue report failed" ;;
     esac
     case "$VERDICT" in
       red|incomplete) notify "kitchen nightly: $PROJECT $VERDICT" "failed: ${FAILED:-unknown} on ${SHA:0:8} (run $RUN_ID)" ||
         warn "not notified: see the log" ;;
     esac
-    record_nightly "$VERDICT" "$FAILED" "$CLEANUP" "$METRICS" "$SHA" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" ${WARNINGS[@]+"${WARNINGS[@]}"} ||
-      log "FAILED to write the nightly record $NIGHTLY_RECORD"
+    record_nightly "$VERDICT" "$FAILED" "$CLEANUP" "$METRICS" "$SHA" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" "$(step_lines)" \
+      ${WARNINGS[@]+"${WARNINGS[@]}"} || log "FAILED to write the nightly record $NIGHTLY_RECORD"
+    prune_evidence
   fi
   find "$LOG_DIR" -name 'guard-*' -mtime +30 -delete
   case "$VERDICT" in
@@ -167,7 +268,7 @@ if [ "$LOCK_STATE" = busy ]; then
 fi
 if [ -z "$TRIAL" ]; then
   close_stale_records "$RUN_ID"
-  record_nightly running "" "$CLEANUP" "$METRICS" "" "$RUN_ID" "$RUN_LOG" "$STARTED_AT"
+  record_nightly running "" "$CLEANUP" "$METRICS" "" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" ""
 fi
 
 PHASE="sync"
@@ -195,6 +296,7 @@ if [ -n "$bad_steps" ]; then
   warn "malformed guard step"
   exit 2
 fi
+read_budgets
 verdict="green"
 ran=0
 for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do
@@ -205,7 +307,14 @@ for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do
   STARTED=1
   ran=$((ran + 1))
   log "step $name"
-  if ! bash -e -o pipefail -c "$cmd" > "$step_log" 2>&1; then
+  step_start=$SECONDS
+  step_status=green
+  bash -e -o pipefail -c "$cmd" > "$step_log" 2>&1 || step_status=red
+  step_seconds=$((SECONDS - step_start))
+  DONE_NAMES+=("$name"); DONE_SECONDS+=("$step_seconds"); DONE_STATUS+=("$step_status")
+  log "step $name $step_status in ${step_seconds}s"
+  snapshot_evidence "$name"
+  if [ "$step_status" = red ]; then
     log "step $name FAILED (log $step_log)"
     verdict="red"; FAILED="$name"; FAILED_LOG="$step_log"
     break

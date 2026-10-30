@@ -64,6 +64,29 @@ redact() { python3 "$KITCHEN_AUTOMATION/lib/redact.py"; }
 # Returns non-zero, saying why on stderr, when it was not shown, also when the platform has no notifier.
 notify() { python3 "$KITCHEN_AUTOMATION/lib/notify.py" "$1" "$2"; }
 
+# One open GitHub issue per label and title: a comment on it while it is open, else a new one. The body travels as a
+# file (an argument is capped far below GitHub's body limit). Sets ISSUE_NUMBER; returns 1 when a gh call failed or
+# gh printed no issue URL, and the caller records the warning.
+open_issue_number() { # label title
+  gh issue list -R "$GH_REPO" --label "$1" --state open --search "in:title \"$2\"" --json number --jq '.[0].number // empty'
+}
+report_issue() { # label color label-description title body-file
+  local existing url
+  ISSUE_NUMBER=""
+  gh label create "$1" -R "$GH_REPO" --color "$2" --description "$3" >/dev/null 2>&1 || true
+  existing="$(open_issue_number "$1" "$4")" || return 1
+  if [ -n "$existing" ]; then
+    gh issue comment "$existing" -R "$GH_REPO" --body-file "$5" >/dev/null || return 1
+    ISSUE_NUMBER="$existing"
+    log "commented on issue #$existing"
+  else
+    url="$(gh issue create -R "$GH_REPO" --title "$4" --label "$1" --body-file "$5")" || return 1
+    [[ "${url##*/}" =~ ^[1-9][0-9]*$ ]] || { log "gh issue create printed no issue URL: ${url:0:200}"; return 1; }
+    ISSUE_NUMBER="${url##*/}"
+    log "opened issue #$ISSUE_NUMBER: $4"
+  fi
+}
+
 # A dedicated clone at the tip of $BRANCH; the developer's checkout is never touched.
 # Destructive (reset and clean): call it only while holding the project lock. Hooks stay off until the
 # tree is back at origin/$BRANCH: the gardener's agent could write files in the previous working tree.
@@ -153,7 +176,7 @@ docker_ready() {
 }
 
 # The nightly history that `kitchen status` reads: one line per run, replaced in place by run_id.
-record_nightly() { # status failed_step cleanup metrics sha run_id log started [warning...]
+record_nightly() { # status failed_step cleanup metrics sha run_id log started steps [warning...]
   python3 "$KITCHEN_AUTOMATION/lib/record.py" "$NIGHTLY_RECORD" write "$@"
 }
 

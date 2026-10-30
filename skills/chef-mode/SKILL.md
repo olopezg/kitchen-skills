@@ -17,11 +17,11 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 | Request | Playbook |
 |---|---|
 | Set a repo up for agents: "kitchen init", "init this repo", guardrails | [playbooks/init.md](playbooks/init.md) |
-| Something broken, failing, flaky or slow, cause unknown | `find-the-cause` |
-| "Analiza", "qué hace X", or before changing code you have not read | `feature-xray` (read-only; ends in decisions) |
-| A diff ready to merge, or anything touching auth, tenant scope, sync, data or migrations | `second-opinion` |
+| A reported bug, or something broken, failing, flaky or slow, cause unknown; a read-only diagnosis: "diagnostica", "por qué ya no funciona", "investiga" | `find-the-cause` |
+| "Analiza", "qué hace X", "investiga qué falta", or before changing code you have not read | `feature-xray` (read-only; ends in decisions) |
+| A diff ready to merge, any reviewer brief, or anything touching auth, tenant scope, sync, data or migrations | `second-opinion` |
 | A plan or request whose important decisions are still open | `make-me-realize` |
-| Pass the work to another session, tool or machine | `handoff` |
+| Pass the work, or a prompt to paste, to another session, tool or machine | `handoff` |
 | Corrections the owner keeps repeating | `retro` |
 | A project's verify skill may no longer tell the truth | `audit-verification` |
 | A feature, fix or refactor | the work loop below |
@@ -31,7 +31,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 1. Read the project's AGENTS.md and `decisions.md`; do not ask what is already decided there.
 2. Name the data shape first; make the smallest change that does the job (`small-owned`, `design`).
 3. Prove it on the project's own check and verify method (see Verification). A behavior change ships with a test that fails without it.
-4. Review and merge as the door and the project's rung allow (see Doors and the trust ladder).
+4. Review and merge as the door and the project's rung allow (see Doors and the trust ladder). Read `second-opinion` in full before you write any reviewer brief.
 5. Report: what changed, how it was proved, what is left, the decisions owed.
 
 ## Doing the work
@@ -60,12 +60,12 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 ## Delegation
 
 - Delegate when the work splits into independent pieces or needs a second opinion from the other model; not for its own sake.
-- A worker runs in chef mode too: start every brief with "Before any work, read the chef-mode skill's SKILL.md in full (`~/.claude/skills/chef-mode/SKILL.md`, or `~/.agents/skills/chef-mode/SKILL.md` in Codex) and follow it." The kitchen registers no agent of its own: Claude Code can pick a registered agent on its own, and chef mode starts only when the owner asks.
+- A worker that edits, reviews or investigates runs in chef mode too: start its brief with "Before any work, read the chef-mode skill's SKILL.md in full (`~/.claude/skills/chef-mode/SKILL.md`, or `~/.agents/skills/chef-mode/SKILL.md` in Codex) and follow it." A worker that investigates a bug: the brief also names `find-the-cause`, so it reads that skill. The kitchen registers no agent of its own: Claude Code can pick a registered agent on its own, and chef mode starts only when the owner asks.
 - Every brief stands alone: goal, scope, exact branch, worktree or SHA, how to verify, and a report of PASS, ISSUES or BLOCKED with evidence.
 - Inspect each worker's core diff and evidence. Do not upgrade ISSUES, BLOCKED, or missing evidence to PASS.
 - Let machine gates handle reversible verification and integration. Resolve technical exceptions within the authorized scope; do not turn them into owner checkboxes.
 - A batch of parallel work is PASS only after `kitchen integrate` passes on the exact sibling SHAs.
-- Review has a budget of two rounds per PR: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings block a merge; P2 and lower become corpus or test cases.
+- Review has a budget of two rounds per PR, and a worker's brief carries it: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings the lead confirmed are fixed; P2 and lower are listed in the report, and become corpus or test cases only when the owner asks.
 - Reviews of risky diffs run on the other model: the reviewers, their effort and their tier are what the owner set in `kitchen models`. For any other delegation, when the interface lets you set a service tier, set it explicitly: Standard unless the owner asks for Fast.
 - A worker that edits files gets its own worktree: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy` and an explicit `baseRef`; elsewhere `git worktree add`. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`).
 - After opening a PR, watch it instead of polling: in T3 Code `link_pull_request` and `watch_pull_request`, then end the turn; elsewhere read `gh pr checks` when the work resumes.
@@ -81,6 +81,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 
 - Label every claim: measured (you ran it; say what and what came out), inferred (you read code or docs; say where) or a guess. Never hand the owner a check you could have run yourself.
 - When you need decisions, number them; each gets one plain sentence on what happens if the owner says yes, then your recommendation, so they can reply "1 yes, 2 B".
+- Keep each decision on one line and label its door on that line: `(two-way)` when a revert undoes it, `(one-way)` otherwise (see Doors), in the owner's language (`(dos vías)` / `(una vía)`). The owner's seat profiles give a two-way decision with your recommendation a deadline and go with it if he stays silent; an unlabeled decision waits for him.
 
 ## When the owner corrects you
 

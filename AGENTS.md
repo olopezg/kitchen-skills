@@ -2,7 +2,7 @@
 
 This file is for agents editing the kitchen itself. `PRINCIPLES.md` says what the kitchen does and why; read it before you change a control. Agents reach it through `/chef-mode`, which links it. The rules agents follow in chef mode live in `skills/chef-mode/SKILL.md`; the kitchen writes no global rules, so each person's own `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` stay theirs.
 
-Autonomy: merge
+Autonomy: merge. It applies in chef mode (`/chef-mode`); outside it, open the pull request and leave the merge to the owner.
 
 ## Rules
 

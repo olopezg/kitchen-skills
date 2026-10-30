@@ -6,8 +6,10 @@ journal, and the journal entry for the pass (bin/daily-audit).
       the latest nightly run, one field per line: status, sha, run_id, failed_step; exit 3 when there is none
   audit_state.py baseline <project>
       the next churn pass's baseline, one per line: its sha and its journal line. It is the newest `audit-verification`
-      entry of the last 30 days whose outcome moves it (clean, clean (churn), changed, skipped), as the
-      audit-verification skill reads it from `kitchen status --json`; exit 3, saying why, when there is none
+      entry of the last 30 days whose outcome moves it (clean, clean (churn), changed, skipped, or exactly
+      `audit-verification findings churn at <sha> (issue #N)`: a sealed pass whose findings landed in the findings
+      issue), as the audit-verification skill reads it from `kitchen status --json`; exit 3, saying why, when there
+      is none
   audit_state.py log <project> <branch> <sha> <run-id> <status> <message>
       appends the pass's entry to the journal on the project's behalf
 
@@ -27,6 +29,7 @@ from kitchen.common import git_common_dir, git_out, now, parse_since, projects  
 
 ENTRY = re.compile(r"^audit-verification (clean \(churn\)|clean|changed|findings|blocked|skipped) (full|churn) at ([0-9a-f]{40})\b")
 MOVES_BASELINE = ("clean", "clean (churn)", "changed", "skipped")
+FILED_FINDINGS = re.compile(r"audit-verification findings churn at ([0-9a-f]{40}) \(issue #[1-9][0-9]*\)")
 WINDOW = "30d"
 
 
@@ -67,9 +70,14 @@ def main() -> int:
         except RuntimeError as error:
             return fail(2, str(error))
         for entry in reversed(entries):
-            match = ENTRY.match(str(entry.get("message", "")))
+            message = str(entry.get("message", ""))
+            match = ENTRY.match(message)
             if match and match.group(1) in MOVES_BASELINE:
-                print(f"{match.group(3)}\n{entry['message']}")
+                print(f"{match.group(3)}\n{message}")
+                return 0
+            filed = FILED_FINDINGS.fullmatch(message)
+            if filed:
+                print(f"{filed.group(1)}\n{message}")
                 return 0
         return fail(3, f"no audit-verification entry that moves the baseline in the last {WINDOW} of the journal")
     if action == "log":

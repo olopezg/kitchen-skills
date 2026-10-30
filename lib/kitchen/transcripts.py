@@ -6,10 +6,16 @@ Signals come from the transcript formats themselves, not from guessing at wordin
   Claude  origin.kind / promptSource (notifications), entrypoint sdk-cli (`claude -p`), assistant
           turns with a synthetic requestId (replayed history), and sessions whose first prompt an agent
           launched through `claude -p` or a T3 Code launch tool (found in that agent's own tool calls).
-  Codex   session_meta originator/source/thread_source (exec, subagents, guardian reviews), and user
-          items without a client_id that carry the <heartbeat> envelope of a Codex automation.
-A few envelopes have no structured marker (harness injections, T3 Code delegation notices); those
+  Codex   session_meta originator/source/thread_source (exec, subagents, guardian reviews), user items
+          without a client_id that carry the <heartbeat> envelope of a Codex automation, and messages a
+          Claude agent sent into the thread through a T3 Code tool (found in that agent's own tool calls).
+A few envelopes have no structured marker (harness injections, T3 Code notices); those
 are matched by their fixed machine-written prefix.
+
+Sources: every Claude config dir in HOME (one per account: ~/.claude, ~/.claude-<name>), ~/.codex, and the lines of
+~/.config/kitchen/retro-sources.txt: a local path, or `ssh <host> [user]`. A remote source runs `kitchen retro` on its
+own host, so it classifies where its transcripts live and only the prompts cross. A source that cannot be read is in
+the coverage line as unreachable or unknown, never left out.
 """
 from __future__ import annotations
 
@@ -17,13 +23,15 @@ import datetime
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 
 import importlib.util
 
-from .common import home, parse_ts, private_terms
+from .common import config_dir, home, parse_since, parse_ts, private_terms
 from .credentials import redact
 
 T3_CONTEXT = re.compile(r"<t3_context.*?</t3_context>", re.S)
@@ -31,9 +39,15 @@ HARNESS = (
     "<task-notification", "<local-command", "<system-reminder",
     "This session is being continued", "[Request interrupted",
     "Context handoff (",  # T3 Code injects these when it moves context between threads
+    "<artifact-content-authored-by-others/>",  # leads a compaction summary that restates artifacts others wrote
 )
 DELEGATED = re.compile(r"^Act as the [\w -]+ sub-agent for this task\.")  # T3 Code wraps delegated tasks this way
-DELEGATION_NOTICE = re.compile(r"^Delegated tasks? \S.*? reached (?:a )?terminal states?\.")  # T3 Code reports finished delegations
+# T3 Code's own notices: a delegated task's state or result (its machine id leads), a watched pull request's update,
+# background work a server restart cancelled
+T3_NOTICE = re.compile(r"^(?:Delegated tasks? \S.*? reached (?:a )?terminal states?\."
+                       r"|Delegated task node:delegated-task:\S+ "
+                       r"|Update on pull request #\d+ \(\S+\), which T3 Code is watching for you:"
+                       r"|Note: the T3 server restarted, and this background work was cancelled)")
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
 SLASH_COMMAND = re.compile(r"^<command-(?:name|message)>")  # Claude Code's envelope for a slash command I typed
 COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
@@ -49,6 +63,8 @@ CODEX_NOT_HUMAN_THREADS = {"subagent", "guardian_review", "security_scan"}
 # Reasons a message is not counted as mine. Order is the order of the coverage line.
 REASONS = ("notification", "harness", "subagent", "automation", "agent-launched", "non-interactive", "replayed")
 UNKNOWN = "unknown"  # not counted as mine nor as excluded: the evidence is missing
+SSH_TIMEOUT = 300  # seconds for a remote source's whole run
+REMOTE_SOURCES = re.compile(r" · sources: (.*)$")
 
 
 def scrub(text: str) -> str:
@@ -114,11 +130,12 @@ def launched(command: str, cwd: str | None) -> list[dict]:
             quoted = " ".join('"' + " ".join(a.split()) + '"' for a in argv)
             out.append({"command": quoted, "dir": os.path.realpath(call.cwd) if call.cwd else None})
     return out
-def agent_launches(since) -> list[dict]:
-    """`claude -p` / `codex exec` commands agents ran: the command, the directory it ran in, and when."""
+
+
+def agent_launches(since, claude_roots: list[Path]) -> list[dict]:
+    """`claude -p` / `codex exec` commands agents ran, in any account: the command, the directory it ran in, and when."""
     launches = []
-    root = home() / ".claude" / "projects"
-    for transcript in sorted(root.glob("*/*.jsonl")):
+    for transcript in sorted(t for root in claude_roots for t in (root / "projects").glob("*/*.jsonl")):
         if transcript.stat().st_mtime < since.timestamp():
             continue
         for line in transcript.open(encoding="utf-8", errors="replace"):
@@ -177,15 +194,16 @@ def launch_evidence(first_prompt: str | None, cwd: str | None, started, launches
 
 def t3_sent(text: str, ts, launches: list[dict]) -> bool:
     """An agent sent this very message through a T3 tool just before it arrived. Per message, not per session:
-    the owner keeps typing in a thread an agent opened, and those messages carry the same fields."""
-    return any(launch.get("any_dir") and launch["ts"] and ts and launch["ts"] <= ts <= launch["ts"] + LAUNCH_WINDOW
-               and matches_launch(text, launch["command"]) for launch in launches)
+    the owner keeps typing in a thread an agent opened, and those messages carry the same fields. T3 delivers the
+    text as sent, so it must start the same way, not merely contain a piece of what the agent sent elsewhere."""
+    key = prefix_key(text)
+    return bool(key) and any(launch.get("any_dir") and launch["ts"] and ts and launch["ts"] <= ts <= launch["ts"] + LAUNCH_WINDOW
+                             and prefix_key(launch["command"]) == key for launch in launches)
 
 
-def claude_prompts(since, launches: list[str]) -> list[dict]:
-    root = home() / ".claude" / "projects"
+def claude_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
     prompts = []
-    for transcript in sorted(root.glob("*/*.jsonl")):  # main sessions only; subagent transcripts live deeper
+    for transcript in sorted((root / "projects").glob("*/*.jsonl")):  # main sessions only; subagent transcripts live deeper
         if transcript.stat().st_mtime < since.timestamp():
             continue
         events = []
@@ -216,11 +234,12 @@ def claude_prompts(since, launches: list[str]) -> list[dict]:
             if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
                 continue
             origin = event.get("origin") if isinstance(event.get("origin"), dict) else {}
+            marked_human = origin.get("kind") == "human" or event.get("promptSource") == "typed"
             for raw in _text_of(content):
                 text = prompt_text(raw)
                 if not text:
                     continue
-                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or DELEGATION_NOTICE.match(text):
+                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or (T3_NOTICE.match(text) and not marked_human):
                     reason = "notification"
                 elif text.startswith(HARNESS):
                     reason = "harness"
@@ -253,8 +272,7 @@ def codex_session_reason(meta: dict) -> str | None:
     return None
 
 
-def codex_prompts(since) -> list[dict]:
-    root = home() / ".codex"
+def codex_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
     files = list((root / "sessions").glob("*/*/*/rollout-*.jsonl")) + list((root / "archived_sessions").glob("rollout-*.jsonl"))
     automation_prompts = []
     for manifest in (root / "automations").glob("*/automation.toml"):
@@ -291,6 +309,10 @@ def codex_prompts(since) -> list[dict]:
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
+                    elif "client_id" not in item and T3_NOTICE.match(text):
+                        reason = "notification"  # T3 posts these with no client_id, like a prompt typed in T3; one typed in Codex has it
+                    elif "client_id" not in item and t3_sent(text, ts, launches):
+                        reason = "agent-launched"  # a lead in another session sent it with t3_thread_send
                     elif any(prompt in text for prompt in automation_prompts):
                         reason = "automation"
                     else:
@@ -300,19 +322,133 @@ def codex_prompts(since) -> list[dict]:
     return prompts
 
 
-def collect(since, tool: str, pattern: str | None, include_automated: bool = False) -> tuple[list[dict], dict]:
-    """Prompts to show, and coverage: how many were included and excluded, by reason."""
-    found = []
-    if tool in ("all", "claude"):
-        found += claude_prompts(since, agent_launches(since))
-    if tool in ("all", "codex"):
-        found += codex_prompts(since)
+def label(kind: str, path: Path) -> str:
+    try:
+        return f"{kind} ~/{path.relative_to(home())}"
+    except ValueError:
+        return f"{kind} {path}"
+
+
+def kind_of(path: Path) -> str | None:
+    """claude for a Claude config dir (it has projects/), codex for a Codex home (it has sessions/)."""
+    if (path / "projects").is_dir():
+        return "claude"
+    if (path / "sessions").is_dir() or (path / "archived_sessions").is_dir():
+        return "codex"
+    return None
+
+
+def sources(home_only: bool) -> list[dict]:
+    """Where my sessions live: this HOME's Claude and Codex dirs, then each line of retro-sources.txt, in order.
+    A listed line that names nothing readable stays in the list with its state, so the gap shows."""
+    found = [{"kind": "claude", "path": p} for p in sorted(home().glob(".claude*")) if p.is_dir() and kind_of(p) == "claude"]
+    if (home() / ".codex").is_dir():
+        found.append({"kind": "codex", "path": home() / ".codex"})
+    listing = config_dir() / "retro-sources.txt"
+    if home_only or not listing.is_file():
+        return found
+    for line in listing.read_text(encoding="utf-8").splitlines():
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            continue
+        if words[0] == "ssh" and len(words) in (2, 3):
+            found.append({"kind": "ssh", "host": words[1], "user": words[2] if len(words) == 3 else None})
+            continue
+        if len(words) != 1:
+            found.append({"kind": "invalid", "label": line.strip(), "state": "unknown (not a path or `ssh <host> [user]`)"})
+            continue
+        path = Path(os.path.expanduser(words[0]))
+        try:
+            kind = kind_of(path)
+        except OSError as error:
+            found.append({"kind": "invalid", "label": label("path", path), "state": f"unknown ({error.strerror or error})"})
+            continue
+        if kind is None:
+            found.append({"kind": "invalid", "label": label("path", path), "state": "unknown (no Claude projects/ or Codex sessions/ there)"})
+        else:
+            found.append({"kind": kind, "path": path})
+    unique, seen = [], set()
+    for source in found:
+        key = os.path.realpath(source["path"]) if "path" in source else id(source)
+        if key not in seen:
+            seen.add(key)
+            unique.append(source)
+    return unique
+
+
+def ssh_label(source: dict) -> str:
+    return " ".join(["ssh", source["host"], *([source["user"]] if source["user"] else [])])
+
+
+def remote_prompts(source: dict, window: str, tool: str, pattern: str | None) -> tuple[list[dict], str]:
+    """Run `kitchen retro` on the remote host over ssh (KITCHEN_SSH stands in for ssh in tests).
+    Its prompts come back classified; the state says whether it could be read."""
+    command = ["kitchen", "retro", "--json", "--include-automated", "--home-only", "--since", window, "--tool", tool]
+    if pattern:
+        command += ["--match", pattern]
+    # a non-interactive shell does not read the profile, so add the dir `kitchen install` links into
+    remote = 'PATH="$HOME/.local/bin:$PATH" ' + shlex.join(command)
+    ssh = [os.environ.get("KITCHEN_SSH") or "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           *(["-l", source["user"]] if source["user"] else []), source["host"], remote]
+    try:
+        result = subprocess.run(ssh, capture_output=True, text=True, timeout=SSH_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return [], f"unknown (no answer in {SSH_TIMEOUT}s)"
+    except OSError as error:
+        return [], f"unknown ({error.strerror or error})"
+    errors = [line for line in result.stderr.splitlines() if line.strip()]
+    if result.returncode == 255:
+        return [], "unreachable"
+    if result.returncode != 0:
+        return [], f"unknown (exit {result.returncode}: {scrub(errors[-1])[:120] if errors else 'no message'})"
+    try:
+        prompts = json.loads(result.stdout)
+        if not (isinstance(prompts, list) and all(isinstance(p, dict) and {"ts", "tool", "text", "excluded"} <= p.keys() for p in prompts)):
+            raise ValueError
+    except ValueError:
+        return [], "unknown (output is not kitchen retro JSON)"
+    # ssh adds its own stderr lines (host-key warnings, "Connection closed"), so the coverage line need not be last
+    coverage = next((match for line in reversed(errors) for match in [REMOTE_SOURCES.search(line)] if match), None)
+    if coverage is None:
+        return [], "unknown (no coverage line from the remote)"
+    name = ssh_label(source)
+    for p in prompts:
+        p["source"] = f"{name}: {p.get('source', '?')}"
+        p["text"] = scrub(str(p["text"]))
+    return prompts, f"ok [{coverage.group(1)}]"
+
+
+def collect(window: str, tool: str, pattern: str | None, include_automated: bool = False,
+            home_only: bool = False) -> tuple[list[dict], dict]:
+    """Prompts to show, and coverage: how many were included and excluded, by reason, and each source's state."""
+    since = parse_since(window)
+    found, states = [], []
+    listed = sources(home_only)
+    launches = agent_launches(since, [s["path"] for s in listed if s["kind"] == "claude"])
+    readers = {"claude": claude_prompts, "codex": codex_prompts}
+    for source in listed:
+        if source["kind"] in readers and tool in ("all", source["kind"]):
+            name = label(source["kind"], source["path"])
+            try:
+                prompts, state = readers[source["kind"]](source["path"], since, launches), "ok"
+            except OSError as error:
+                prompts, state = [], f"unknown ({error.strerror or error})"
+            found += [{**p, "source": name} for p in prompts]
+        elif source["kind"] == "ssh":
+            name = ssh_label(source)
+            prompts, state = remote_prompts(source, window, tool, pattern)
+            found += prompts
+        elif source["kind"] == "invalid":
+            name, state = source["label"], source["state"]
+        else:
+            continue
+        states.append({"source": name, "state": state})
     if pattern:
         regex = re.compile(pattern, re.IGNORECASE)
         found = [p for p in found if regex.search(p["text"])]
     excluded = Counter(p["excluded"] for p in found if p["excluded"])
     coverage = {"included": sum(1 for p in found if not p["excluded"]), "excluded": {r: excluded[r] for r in REASONS if excluded[r]},
-                "unknown": excluded[UNKNOWN]}
+                "unknown": excluded[UNKNOWN], "sources": states}
     shown = found if include_automated else [p for p in found if not p["excluded"]]
     if not include_automated:
         for p in shown:
@@ -322,8 +458,9 @@ def collect(since, tool: str, pattern: str | None, include_automated: bool = Fal
 
 def coverage_line(coverage: dict) -> str:
     reasons = ", ".join(f"{reason} {count}" for reason, count in coverage["excluded"].items()) or "none"
+    read = ", ".join(f"{s['source']} {s['state']}" for s in coverage["sources"]) or "none"
     return (f"{coverage['included']} prompts included · {sum(coverage['excluded'].values())} excluded ({reasons})"
-            f" · {coverage['unknown']} unknown provenance")
+            f" · {coverage['unknown']} unknown provenance · sources: {read}")
 
 
 def render(prompts: list[dict], full: bool, coverage: dict) -> str:

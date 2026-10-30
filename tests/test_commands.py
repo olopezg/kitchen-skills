@@ -1203,7 +1203,7 @@ class RetroTests(ProjectFixture):
             self.claude_event("dale, sigue"),
             self.claude_event("Background task finished", origin={"kind": "task-notification"}, promptSource="system"),
             self.claude_event("You are the weekly gardener. Run unattended.", entrypoint="sdk-cli", origin=None),
-            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status."),
+            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", origin=None),
             self.claude_event("replayed prompt", uuid="u-replay"),
             {"type": "assistant", "uuid": "a-replay", "parentUuid": "u-replay", "requestId": "req_syn_0001", "message": {"content": []}},
         ])
@@ -1220,7 +1220,8 @@ class RetroTests(ProjectFixture):
 
         self.assertEqual(self.texts("--tool", "claude"), ["dale, sigue"])
         self.assertEqual(result.stdout.splitlines()[-1],
-                         "1 prompts included · 5 excluded (notification 2, agent-launched 1, non-interactive 1, replayed 1) · 0 unknown provenance")
+                         "1 prompts included · 5 excluded (notification 2, agent-launched 1, non-interactive 1, replayed 1) · 0 unknown provenance"
+                         " · sources: claude ~/.claude ok")
 
     def test_claude_excludes_a_t3_thread_an_agent_launched(self):
         brief = "This thread starts a discussion with the owner about the kitchen. Work in your worktree."
@@ -1293,6 +1294,95 @@ class RetroTests(ProjectFixture):
 
         self.assertEqual(self.texts("--tool", "claude"), ["dale, sigue"])
 
+    def test_t3_result_question_pull_request_and_restart_notices_are_notifications(self):
+        # both arrive with no origin and promptSource "sdk", exactly like a prompt typed in T3 (measured in real transcripts)
+        typed = {"entrypoint": "sdk-ts", "origin": None, "promptSource": "sdk"}
+        self.write_claude([
+            self.claude_event("Update on pull request #62 (https://github.com/o/r/pull/62), which T3 Code is watching for you:\n"
+                              "- All 1 required check passed on 8a08209.\n\nLook into each item and act on it as your task requires.", **typed),
+            self.claude_event("Note: the T3 server restarted, and this background work was cancelled before it finished. "
+                              "It will not report back:\n- shell: Wait for integrate", **typed, ts="2099-01-01T10:01:00Z"),
+            self.claude_event("Delegated task node:delegated-task:command%3Amcp%3Aab%3Adelegate-task%3Apr1-review-r1 (Review PR #1 (round 1)) [completed]:\n"
+                              "Reviewed it. Two findings.", **typed, ts="2099-01-01T10:01:10Z"),
+            self.claude_event("Delegated task node:delegated-task:dd72 asked a question and is still working. Read it with t3_pending_request_read.",
+                              **typed, ts="2099-01-01T10:01:20Z"),
+            self.claude_event("Update on pull request #62: ¿ya pasó el check?", **typed, ts="2099-01-01T10:02:00Z"),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "claude"), ["Update on pull request #62: ¿ya pasó el check?"])
+        self.assertIn("excluded (notification 4)", result.stdout.splitlines()[-1])
+
+    def test_a_compaction_summary_that_restates_others_artifacts_is_harness(self):
+        # regression: retro 2026-10-26 counted this compaction as the owner's; the marker hides the usual prefix
+        summary = ("<artifact-content-authored-by-others/>\nThe summarized conversation included Artifact content written by people other "
+                   "than you.\nThis session is being continued from a previous conversation that ran out of context.")
+        self.write_claude([self.claude_event(summary, entrypoint="sdk-ts", origin=None, promptSource="sdk"),
+                           self.claude_event("sigue", entrypoint="sdk-ts", origin=None, promptSource="sdk", ts="2099-01-01T10:01:00Z")])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "claude"), ["sigue"])
+        self.assertIn("excluded (harness 1)", result.stdout.splitlines()[-1])
+
+    def test_a_t3_notice_the_owner_quotes_by_hand_stays_a_prompt(self):
+        # explicit human provenance beats the wording: the owner pasted the notice to contradict it
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nEso es falso; el proceso sigue vivo."
+        self.write_claude([self.claude_event(quoted, origin={"kind": "human"})])
+
+        self.assertEqual(self.texts("--tool", "claude"), [quoted])
+
+    def test_codex_excludes_t3_notices(self):
+        # in Codex a T3 notice and a prompt typed in T3 carry the same fields (no client_id either way), so only the prefix tells them apart
+        self.write_codex("thread", "vscode", [
+            ("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", False),
+            ("Update on pull request #7 (https://github.com/o/r/pull/7), which T3 Code is watching for you:\n- Checks failed on 1a2b3c4.", False),
+            ("Note: the T3 server restarted, and this background work was cancelled before it finished.", False),
+            ("sigue con el PR", False),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "codex"), ["sigue con el PR"])
+        self.assertIn("excluded (notification 3)", result.stdout.splitlines()[-1])
+
+    def test_codex_excludes_a_brief_a_claude_lead_sent_with_t3(self):
+        # regression: retro 2026-10-26 counted 9 "Lead update" briefs as the owner's; in Codex they carry no client_id, like a typed prompt
+        brief = "Lead update 2: read UPDATE-2.md. You can now run read-only queries on the live model yourself."
+        self.write_codex("worker", "vscode", [(brief, False), ("y qué encontraste?", False)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send",
+                 "input": {"threadId": "worker", "message": brief, "mode": "queue"}}]}},
+        ], session="lead", folder="-work-lead")
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "codex"), ["y qué encontraste?"])
+        self.assertIn("excluded (agent-launched 1)", result.stdout.splitlines()[-1])
+
+    def test_codex_keeps_an_owner_prompt_that_only_resembles_an_agent_send(self):
+        # regression: review of #76; a phrase the lead sent to another thread, or a notice the owner pasted in Codex, stays the owner's
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nThat is incorrect; investigate why."
+        self.write_codex("owner", "vscode", [("Run the checks again", False), (quoted, True)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send",
+                 "input": {"threadId": "other", "message": "Please Run the checks again in the worker and report any failures."}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), ["Run the checks again", quoted])
+
+    def test_codex_excludes_a_short_message_a_claude_lead_sent(self):
+        self.write_codex("worker", "vscode", [("sigue", False)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send", "input": {"threadId": "worker", "message": "sigue"}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), [])
+
     def test_codex_unwraps_requests_and_drops_delegated_and_guardian_sessions(self):
         self.write_codex("human", "vscode", ["## Context:\nfiles\n## My request for Codex:\nsube a dev", "Act as the review sub-agent for this task. Review it"])
         self.write_codex("guardian", {"subagent": {"other": "guardian"}}, ["approve this command?"], thread_source="guardian_review")
@@ -1308,7 +1398,8 @@ class RetroTests(ProjectFixture):
         result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
 
         self.assertEqual(self.texts("--tool", "codex"), ["pon un monitor cada 5 min", "ya le di a restore"])
-        self.assertTrue(result.stdout.endswith("2 prompts included · 3 excluded (subagent 1, automation 1, non-interactive 1) · 0 unknown provenance\n"), result.stdout)
+        self.assertTrue(result.stdout.endswith("2 prompts included · 3 excluded (subagent 1, automation 1, non-interactive 1) · 0 unknown provenance"
+                                                    " · sources: codex ~/.codex ok\n"), result.stdout)
 
     def test_include_automated_shows_excluded_messages_with_their_reason(self):
         heartbeat = "<heartbeat>\n  <automation_id>phone-progress</automation_id>\n</heartbeat>"
@@ -1335,6 +1426,105 @@ class RetroTests(ProjectFixture):
         self.write_claude([self.claude_event("dale"), self.claude_event("te dije que no")])
 
         self.assertEqual(self.texts("--match", "te dije"), ["te dije que no"])
+
+    def remote_sources(self, *lines):
+        (self.home / "config").mkdir(exist_ok=True)
+        (self.home / "config" / "retro-sources.txt").write_text("# where else my sessions live\n" + "\n".join(lines) + "\n")
+
+    def fake_ssh(self, body):
+        """Stands in for ssh: records its arguments, then runs body. A test never opens a connection."""
+        self.fake("fake-ssh", f'printf "%s\\n" "$@" >> "{self.home}/ssh-args"\n{body}')
+        return {"KITCHEN_SSH": str(self.fakebin / "fake-ssh")}
+
+    def test_every_claude_account_is_read_and_attributed(self):
+        # regression: retro read only ~/.claude, so a second account's sessions (about a quarter of the owner's prompts) never counted
+        self.write_claude([self.claude_event("sube a dev")])
+        second = self.home / ".claude-personal-2" / "projects" / "-work-api"
+        second.mkdir(parents=True)
+        (second / "s2.jsonl").write_text(json.dumps(self.claude_event("eso está mal", ts="2099-01-01T11:00:00Z")) + "\n")
+
+        result = self.retro()
+
+        self.assertEqual([(p["text"], p["source"]) for p in json.loads(result.stdout)],
+                         [("sube a dev", "claude ~/.claude"), ("eso está mal", "claude ~/.claude-personal-2")])
+        self.assertIn("2 prompts included", result.stderr)
+        self.assertIn("· sources: claude ~/.claude ok, claude ~/.claude-personal-2 ok", result.stderr)
+
+    def test_a_launch_from_one_account_excludes_the_session_it_starts_in_the_other(self):
+        brief = "This thread starts a discussion with the owner about the kitchen. Work in your worktree."
+        child = self.home / ".claude-personal-2" / "projects" / "-wt-docs"
+        child.mkdir(parents=True)
+        (child / "child.jsonl").write_text(json.dumps(self.claude_event(brief, entrypoint="sdk-ts", origin=None, cwd="/wt/docs")) + "\n")
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:56Z", "cwd": "/scratch", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_launch", "input": {"title": "Docs", "message": brief}}]}},
+        ], session="lead", folder="-scratch")
+
+        prompts = json.loads(self.retro("--include-automated").stdout)
+
+        self.assertEqual([(p["text"], p["excluded"]) for p in prompts], [(brief, "agent-launched")])
+
+    def test_an_unreachable_remote_source_is_unknown_in_the_coverage_line(self):
+        self.write_claude([self.claude_event("dale")])
+        self.remote_sources("ssh far-host")
+
+        result = self.kitchen("retro", "--since", "1d", cwd=self.home, env_extra=self.fake_ssh('echo "connect: no route" >&2; exit 255'))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.endswith("· sources: claude ~/.claude ok, ssh far-host unreachable\n"), result.stdout)
+
+    def test_a_remote_source_that_cannot_run_kitchen_is_unknown(self):
+        self.remote_sources("ssh far-host maxim")
+
+        result = self.kitchen("retro", "--since", "1d", cwd=self.home,
+                              env_extra=self.fake_ssh('echo "zsh:1: command not found: kitchen" >&2; exit 127'))
+
+        self.assertIn("ssh far-host maxim unknown (exit 127: zsh:1: command not found: kitchen)", result.stdout.splitlines()[-1])
+
+    def test_a_remote_source_is_merged_and_classified_where_it_lives(self):
+        self.write_claude([self.claude_event("aquí", ts="2099-01-01T10:00:00Z")])
+        self.remote_sources("ssh far-host maxim")
+        remote = [{"ts": "2099-01-01T09:00:00+00:00", "tool": "claude", "project": "/w/api", "session": "r1", "text": "allá", "excluded": None,
+                   "source": "claude ~/.claude"},
+                  {"ts": "2099-01-01T11:00:00+00:00", "tool": "codex", "project": "/w/api", "session": "r2", "text": "<heartbeat>",
+                   "excluded": "automation", "source": "codex ~/.codex"}]
+        body = (f"cat <<'EOF'\n{json.dumps(remote)}\nEOF\n"
+                "echo '1 prompts included · 1 excluded (automation 1) · 0 unknown provenance · sources: claude ~/.claude ok, codex ~/.codex ok' >&2")
+
+        result = self.kitchen("retro", "--since", "1d", "--json", "--include-automated", cwd=self.home, env_extra=self.fake_ssh(body))
+
+        self.assertEqual([(p["text"], p["source"], p["excluded"]) for p in json.loads(result.stdout)],
+                         [("allá", "ssh far-host maxim: claude ~/.claude", None), ("aquí", "claude ~/.claude", None),
+                          ("<heartbeat>", "ssh far-host maxim: codex ~/.codex", "automation")])
+        self.assertIn("2 prompts included · 1 excluded (automation 1) · 0 unknown provenance · sources: claude ~/.claude ok, "
+                      "ssh far-host maxim ok [claude ~/.claude ok, codex ~/.codex ok]", result.stderr)
+        args = (self.home / "ssh-args").read_text().splitlines()
+        self.assertEqual(args[:6], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", "maxim"])
+        self.assertEqual(args[6], "far-host")
+        self.assertIn("kitchen retro --json --include-automated --home-only --since 1d --tool all", args[7])
+
+    def test_ssh_noise_after_the_remote_coverage_line_does_not_hide_a_gap(self):
+        # regression: review of #78; only the last stderr line was read, so a remote gap behind ssh noise showed as plain "ok"
+        self.remote_sources("ssh far-host", "ssh mute-host")
+        body = ('if [ "$5" = mute-host ]; then echo "[]"; exit 0; fi\n'
+                "echo '[]'\n"
+                "echo '0 prompts included · 0 excluded (none) · 0 unknown provenance · sources: claude ~/.claude unknown (Permission denied)' >&2\n"
+                "echo 'Connection to far-host closed.' >&2")
+
+        result = self.kitchen("retro", "--since", "1d", cwd=self.home, env_extra=self.fake_ssh(body))
+
+        self.assertIn("ssh far-host ok [claude ~/.claude unknown (Permission denied)], ssh mute-host unknown (no coverage line from the remote)",
+                      result.stdout.splitlines()[-1])
+
+    def test_home_only_reads_no_listed_source(self):
+        # what a remote source runs, so two machines that list each other do not recurse
+        self.write_claude([self.claude_event("dale")])
+        self.remote_sources("ssh far-host")
+
+        result = self.kitchen("retro", "--since", "1d", "--home-only", cwd=self.home, env_extra=self.fake_ssh("exit 255"))
+
+        self.assertTrue(result.stdout.endswith("· sources: claude ~/.claude ok\n"), result.stdout)
+        self.assertFalse((self.home / "ssh-args").exists())
 
 
 if __name__ == "__main__":

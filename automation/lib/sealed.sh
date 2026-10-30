@@ -86,6 +86,20 @@ make_agent_clone() { # sha
   CLONE_DIR="$AGENT_CLONE" install_push_guard
 }
 
+# What the agent wrote and the job publishes (its PR summary, the audit's report) is read once, without following a
+# link, into a path the agent cannot write, and only that copy is used: the agent writes its work dir, so it could
+# link the file to any host file. Returns 1 unless <file> is a regular file with a single link.
+copy_agent_file() { # file copy
+  python3 -c '
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+info = os.fstat(fd)
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as source, open(sys.argv[2], "wb") as copy:
+    copy.write(source.read())' "$1" "$2" 2>/dev/null
+}
+
 # srt runs the job's verification; it is a node script, and EXTRA_PATH must reach node under launchd.
 require_srt() {
   [ -x "$SRT" ] || stop "$VERIFY_STEPS_NAME is set and srt is not installed: npm ci --ignore-scripts --prefix $KITCHEN_AUTOMATION"
@@ -292,9 +306,11 @@ publish() {
   secrets="$(git diff -U0 --no-color "$BASE_SHA" "$tree" | python3 "$KITCHEN_AUTOMATION/lib/scan_diff.py")" ||
     { refuse "possible secret in the diff: $(printf '%s' "$secrets" | tr '\n' ';' | cut -c1-300)"; return 1; }
   [ -s "$SUMMARY_FILE" ] || refuse "no PR summary at $SUMMARY_FILE" || return 1
-  title="$(grep -m1 -v '^[[:space:]]*$' "$SUMMARY_FILE" | sed -E 's/^#+[[:space:]]*//' | cut -c1-120 | redact)" || refuse "could not read the PR title" || return 1
+  local summary="$JOB_DIR/summary.md"
+  copy_agent_file "$SUMMARY_FILE" "$summary" || refuse "the PR summary at $SUMMARY_FILE is not a regular file of its own" || return 1
+  title="$(grep -m1 -v '^[[:space:]]*$' "$summary" | sed -E 's/^#+[[:space:]]*//' | cut -c1-120 | redact)" || refuse "could not read the PR title" || return 1
   [ -n "$title" ] || refuse "empty PR title in $SUMMARY_FILE" || return 1
-  awk 'seen { print; next } /[^[:space:]]/ { seen = 1 }' "$SUMMARY_FILE" | redact > "$JOB_DIR/body.md" ||
+  awk 'seen { print; next } /[^[:space:]]/ { seen = 1 }' "$summary" | redact > "$JOB_DIR/body.md" ||
     refuse "could not redact the PR summary" || return 1
   verify_tree "$tree" || return 1
   printf '\n---\n%s\n' "$VERIFY_REPORT" >> "$JOB_DIR/body.md"

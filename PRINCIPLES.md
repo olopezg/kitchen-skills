@@ -69,7 +69,7 @@ The owner's attention is the scarcest resource in the kitchen. On reversible wor
 - **When:** planning, reporting, designing any check or automation.
 - **Includes (pstack):**
   - *Never Block on the Human*: proceed on reversible work and let the owner correct afterwards. pstack lets external actions proceed; the kitchen does not: one-way doors (`doors`) and anything sent to people or published still wait for the owner's explicit request.
-- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; `status --exceptions` (prints only non-green, exits 1); notifications only for red, incomplete, blocked or decision; the nightly opens one issue while red and closes it when green; the init playbook asks the owner once, only about what the repo cannot answer. Reply format: rule only.
+- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; `status --exceptions` (prints only non-green, exits 1); notifications only for red, incomplete, blocked or decision; the nightly opens one issue while red and closes it when green; the daily audit files its findings in one issue per project; the init playbook asks the owner once, only about what the repo cannot answer. Reply format: rule only.
 
 ## 7. Know your doors (`doors`)
 
@@ -115,7 +115,7 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 
-The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 block; the rest becomes test or corpus cases. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
+The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 the lead confirmed are fixed; the rest is listed in the report. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
 
 - **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
 - **When:** before merge, and whenever a worker reports back.

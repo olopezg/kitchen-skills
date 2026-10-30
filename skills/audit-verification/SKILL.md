@@ -14,21 +14,21 @@ Say which one:
 
 - **clean**: a full pass covered every feature from source and live; nothing to change. A churn pass that covers its whole scope says **clean (churn)** and lists its features; it claims nothing about the rest.
 - **changed**: one PR with proven corrections to the verify skill.
-- **findings**: the audit found drift or gaps, but fixing them was not authorized; report them with evidence and change nothing.
+- **findings**: the audit found drift or gaps it could not fix (not authorized, or beyond what the pass may ship); report them with evidence. With fixes authorized, a sealed pass still ships its prose fixes in one PR alongside.
 - **blocked**: coverage could not finish or a fix could not ship safely; say exactly why.
 - **skipped**: a churn pass found no change since the last audit; it claims no coverage, so never call it clean.
 
 ## Scope
 
-A **full** pass covers every feature file. A **churn** pass (the daily run) covers only the features whose code, or whose map file, changed since the last audit's SHA, plus the churn sweep in step 1. The baseline is the latest `audit-verification` entry in the `journal` list of `kitchen status --json --since 30d <repo>` (the text view shows only five entries) whose outcome is clean, clean (churn), changed or skipped. A blocked or findings audit never moves the baseline: what it left uncovered stays in scope. With no baseline, run a full pass. Say which scope ran and from which baseline.
+A **full** pass covers every feature file. A **churn** pass (the daily run) covers only the features whose code, or whose map file, changed since the last audit's SHA, plus the churn sweep in step 1. The baseline is the latest `audit-verification` entry in the `journal` list of `kitchen status --json --since 30d <repo>` (the text view shows only five entries) whose outcome is clean, clean (churn), changed or skipped, or a sealed pass's `findings churn at <sha> (issue #N)`: its findings live in that issue. Any other blocked or findings audit never moves the baseline: what it left uncovered stays in scope. With no baseline, run a full pass. Say which scope ran and from which baseline.
 
 ## Sealed pass
 
-The daily automation (`automation/bin/daily-audit`) runs a churn pass sealed: no network, no Docker, no credentials, so it cannot drive the app, run a control, read the journal or open a PR. Its job runs it only after the nightly guard went green on the audited SHA, and hands it the baseline, the guard's record, step logs and evidence. Afterwards the job logs the outcome and publishes the PR. In a sealed pass:
+The daily automation (`automation/bin/daily-audit`) runs a churn pass sealed: no network, no Docker, no credentials, so it cannot drive the app, run a control, read the journal or open a PR. Its job runs it only after the nightly guard went green on the audited SHA, and hands it the baseline, the guard's record, step logs and evidence. Afterwards the job logs the outcome, publishes the PR and files findings in the project's one open findings issue (label `audit-verification-findings` by default). In a sealed pass:
 
 - what the guard's proof and control do not cover is a finding, never clean;
 - a fix to what runs (a drive block, an assertion, the verifier, a control) needs a live drive before it ships, so it is a finding; only doc drift in prose is fixed, and the job refuses anything else;
-- any finding makes the outcome **findings**, with no branch.
+- any finding makes the outcome **findings**; its prose fixes still go on its one branch, and the job publishes them as for **changed**.
 
 ## Edit scope
 
@@ -59,7 +59,7 @@ A feature can be in the inventory, driven, and still asserted by nothing. Report
    Red on both, or green on both, means the verifier is not measuring the feature. If it stays green under the fault, that is the most important finding of the audit.
 6. **Triage**: doc drift, fix it; harness gap, fix it and drive it again live before it ships (a sealed pass reports it as a finding); product gap, report it outside the PR. Without authorization to fix, all of them are findings.
    Never turn a known product defect into a green expectation. If the verifier must keep running past it, mark it as an explicit expected failure (XFAIL) that stays visible in every run and goes red the day it starts passing, with the defect's reference.
-7. **Ship or stop**: for **changed**, re-read every changed file, then open one PR. Otherwise no branch. Either way, run `kitchen log "audit-verification <outcome> <full|churn> at <audited full sha>"` from the project (add `--status blocked` when blocked) so the next churn pass knows where to start; a sealed pass writes its outcome where its prompt says, and its job logs it and opens the PR. Keep run notes in scratch; never commit them.
+7. **Ship or stop**: for **changed**, re-read every changed file, then open one PR. Otherwise no branch, except a sealed pass's prose fixes. Either way, run `kitchen log "audit-verification <outcome> <full|churn> at <audited full sha>"` from the project (add `--status blocked` when blocked) so the next churn pass knows where to start; a sealed pass writes its outcome where its prompt says, and its job logs it and opens the PR. A full pass that ends clean or changed closes the open findings issue with a comment naming the audited SHA (`gh issue close <n> --comment ...`), and says so; nothing else closes it, since a churn pass covers only its scope. Keep run notes in scratch; never commit them.
 
 ## Reply
 
