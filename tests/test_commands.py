@@ -99,6 +99,15 @@ class LogAndStatusTests(ProjectFixture):
         self.assertEqual((entry["branch"], entry["agent"], entry["status"]), ("main", "claude", "done"))
         self.assertTrue(entry["sha"])
 
+    def test_log_refuses_a_one_word_message_and_writes_nothing(self):
+        project = self.make_project()
+
+        result = self.kitchen("log", "list", cwd=project)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("kitchen status", result.stderr)
+        self.assertFalse((self.home / "state" / "log.jsonl").exists())
+
     def test_log_records_the_session_of_the_agent_that_logged(self):
         project = self.make_project()
 

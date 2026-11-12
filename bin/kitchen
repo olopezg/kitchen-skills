@@ -395,6 +395,12 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_log(args: argparse.Namespace) -> int:
+    # A checkpoint is a sentence. A single word is a mistyped read ("kitchen log list", four times on 2026-11-11):
+    # writing it would leave a false checkpoint in the journal.
+    if len(args.message.split()) < 2:
+        print(f"kitchen log: {args.message!r} is not a checkpoint (one word); to read checkpoints use kitchen status",
+              file=sys.stderr)
+        return 2
     entry = journal.write(args.message, args.status, Path.cwd())
     print(f"logged  {entry['status']} · {entry['repo']} @ {entry['sha'] or 'no git'} · {entry['agent']}")
     problem = journal.notify_owner(entry)
